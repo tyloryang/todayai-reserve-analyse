@@ -442,7 +442,181 @@ Today AI 最具创新性的前端技术在于其 **Today Card Kit (`.tckb`) 动�
 
 ---
 
-## 九、总结与架构设计启示
+---
+
+## 九、用户请求全生命周期端到端数据流与源码级剖析 (End-to-End User Request Data Flow)
+
+为了深入理解 Today AI 在接收用户指令后，各进程与网络节点之间的数据交互机制，我们对三大典型场景进行源码级的数据流全链路追踪：
+
+---
+
+### 9.1 场景一：纯文本对话与流式推理数据流 (Standard Chat & Streaming Inference)
+
+当用户在界面对话框键入 prompt（如：“总结我今天的核心待办事项”）并回车时：
+
+```
+[前端 React 19 UI]
+       │
+       │ 1. fetch('/api/cloud/v1/chat/completions', { method: 'POST', body })
+       ▼
+[Windows 命名管道 (\\.\pipe\today-web-runtime-${UUID})]
+       │
+       │ 2. DesktopWebRuntimeCookieBridge 拦截请求
+       │    sei.account.getFreshAuthContext() 获取短期 JWT
+       │    注入标头 Authorization: Bearer <AccessToken>
+       ▼
+[Next.js Standalone 内部服务 (server.js)]
+       │
+       │ 3. 根据 _originalRewrites 规则反向代理
+       │    /api/cloud/:path*  ──►  https://api.todayai.cn/:path*
+       ▼
+[Today AI 云端网关 & 大模型集群 (api.todayai.cn)]
+       │
+       │ 4. 大模型意图解析与文本生成
+       │    通过 Server-Sent Events (SSE) 持续流式传输 Token
+       ▼
+[前端 React 增量渲染] (基于 Virtual DOM 实时打字机刷新)
+```
+
+#### 关键源码定位：
+在 `dist/app/app/index.js:233140` 的 `DesktopWebRuntimeCookieBridge` 中：
+```typescript
+class DesktopWebRuntimeCookieBridge {
+    async prepareRequestHeaders(request, headers) {
+        // Electron 渲染进程发出的请求会被移除原生 Cookie。
+        // 主进程通过 SEI 提取当前账号在 Node 端的上下文，动态为合法逻辑源注入 Bearer Token：
+        const auth = await this.adapter.sei.account.getFreshAuthContext();
+        if (auth) {
+            headers.set('authorization', `Bearer ${auth.accessToken}`);
+        }
+        // 校验逻辑源，防范恶意伪造
+        if (hasLogicalOriginRequestContext(request)) {
+            headers.set(DESKTOP_WEB_RUNTIME_LOGICAL_ORIGIN_HEADER, this.webOrigin);
+        }
+    }
+}
+```
+
+---
+
+### 9.2 场景二：端云闭环的 Agent 本地 Tool 调度数据流 (Agentic Local Tool Execution Loop)
+
+这是 Today AI 最具技术含量的端云混合链路。当用户发起指令：“**帮我检索桌面上的合同文档，并截取当前屏幕**”时：
+
+```
++----------------------------------------------------------------------------------------------------+
+| 步骤 1：云端发起 Tool 调度请求                                                                     |
+| 云端大模型在 ToolCatalogSync 预先上报的 53 种工具中选定 fs.list 与 screen.capture，通过 WSS 下发:     |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ WebSocket: { "type": "invocation.request", "invocationId": "inv_8f7b...", "capabilityId": "fs.list", "arguments": { "path": "desktop" } }
+       ▼
++----------------------------------------------------------------------------------------------------+
+| 步骤 2：端侧安全网关拦截 (SocketNativeTools.route)                                                 |
+| 1. 预算与超时计算：budgetMs = Math.min(300000, request.timeoutMs ?? 30000)                         |
+| 2. 授权范围断言：await this.authorization.isInvocationAuthorized(capabilityId, args)              |
+| 3. 若属于敏感操作且用户尚未授权，拉起原生 tool-permissions 窗口请求许可                              |
+| 4. 启动心跳维持：每 15 秒向云端发送 sendProgress(invocationId)，防止长耗时任务断连                 |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ CPI 协议打包：JSON-RPC 2.0 (NDJSON) over Stdin
+       ▼
++----------------------------------------------------------------------------------------------------+
+| 步骤 3：跨进程调度 C# 宿主 (TodayWindowsPlatformHost.exe)                                           |
+| 1. 管道写入：nei.tools.invocationRequested                                                        |
+| 2. C# 宿主接收请求，脱离 Chromium 沙箱限制，直接调用 Win32 原生 API 遍历本地桌面目录               |
+| 3. 若调用 screen.capture，则调用 Windows Desktop Duplication API (DXGI) 捕获高清帧并完成编码      |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ C# 执行完毕，通过 Stdout 返回 NDJSON 报文:
+       │ { "jsonrpc": "2.0", "method": "nei.tools.completeInvocation", "params": { "invocationId": "inv_8f7b...", "success": true, "data": { ... } } }
+       ▼
++----------------------------------------------------------------------------------------------------+
+| 步骤 4：主进程收集结果并触发端侧即时响应                                                           |
+| 1. completeInvocation 接收并校验结果一致性                                                         |
+| 2. nativeToolCompletions.emit('completed', result) 触发本地连接器即刻更新，不等定时轮询           |
+| 3. 通过 WebSocket 将 execution result 上送云端: { "type": "invocation.result", "result": {...} }  |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ WebSocket 上报云端大模型
+       ▼
++----------------------------------------------------------------------------------------------------+
+| 步骤 5：云端二次推理与 TCK 动态卡片下发                                                             |
+| 云端大模型接收端侧文件列表与截屏数据，将其作为上下文生成最终结论，同时下发动态文件卡片组件哈希:   |
+| { "message": "已为您检索到以下 3 份合同文档...", "widget": { "bundleHash": "tck_contract_v1" } }   |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ 页面解析 widget 引用
+       ▼
++----------------------------------------------------------------------------------------------------+
+| 步骤 6：TCK 动态微前端解包渲染                                                                     |
+| 1. 前端请求内部 Next.js 服务: GET /api/widgets/v1/tck_contract_v1/bundle.tckb                     |
+| 2. today-widget-runtime 解压 .tckb ZIP 容器，校验 integrity.json 签名                               |
+| 3. 动态加载 widget.mjs，在 Shadow DOM 沙箱内完成具有交互能力的动态卡片呈现                        |
++----------------------------------------------------------------------------------------------------+
+```
+
+#### 源码证据与细节走读：
+1. **主进程指令分发核心**（`dist/app/app/index.js:203440`）：
+   ```typescript
+   // 严格的预算计算与本地超时定时器：
+   const budgetMs = Math.min(MAX_TIMEOUT_MS, Math.max(0, request.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+   const deadlineAt = receivedAt + budgetMs - Math.min(RESULT_MARGIN_MS, budgetMs / 10);
+   
+   // 授权断言
+   const authorized = await this.authorization.isInvocationAuthorized(request.capabilityId, request.arguments);
+   if (!authorized) {
+       client?.sendInvocationResult?.({
+           invocationId: request.invocationId,
+           success: false,
+           error: { code: 'CAPABILITY_DISABLED', message: 'The user has not allowed this local connector.' }
+       });
+       return false;
+   }
+   ```
+2. **端侧即时响应设计（内部原版注释见 `dist/app/app/index.js:206298`）**：
+   ```typescript
+   /**
+    * Native 回传一次远程工具结果之后的 Node 内通知（不进 SEI 契约）。
+    * Device Connector Sync 用它把 agent 写日历 / 提醒的成功执行翻译成一次即时读取，不等变化通知的去抖。
+    */
+   subscribeNativeToolInvocationCompleted(listener) {
+       this.nativeToolCompletions.on('completed', listener);
+   }
+   ```
+
+---
+
+### 9.3 场景三：语音交互与实时会议纪要流 (Voice & Audio Pipeline)
+
+当用户点击悬浮录音胶囊或在会议中开启“自动记录”时：
+
+```
+[悬浮录音胶囊 UI / 主界面]
+       │
+       │ 1. 调用 WEI API: window.__DesktopWebExtendedAPI.record.start()
+       ▼
+[Preload (desktop.cjs) ➔ IPC Main]
+       │
+       │ 2. 调度 CPI 接口: cpi.audio.startCapture({ sampleRate: 16000, channels: 1 })
+       ▼
+[TodayWindowsPlatformHost.exe (.NET 宿主)]
+       │
+       │ 3. 独占打开 Windows CoreAudio / WASAPI 音频采集流
+       │    启动内置回声消除 (AEC) 与降噪算法
+       │
+       ├──► 4. 高频电平监测 (每 50ms):
+       │       触发 cpi.audio.levelChanged({ level: 0.78 }) 
+       │       ➔ 主进程广播给 recording-capsule 窗口，驱动声波律动跳跃
+       │
+       └──► 5. 音频分片流转 (每 30s):
+               触发 cpi.audio.segmentCompleted({ segmentId, buffer, durationMs })
+               ➔ Node 主进程接收并以分块方式流式上传至云端 ASR/Whisper 服务进行转写
+```
+
+---
+
+## 十、总结与架构设计启示
 
 Today AI 桌面端（`today-windows-x64.exe`）的设计代表了当前顶级 AI Agent 客户端工程的前沿水准：
 

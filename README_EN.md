@@ -19,7 +19,8 @@ This repository provides an in-depth reverse engineering and architectural analy
   - [Module 5: Cloud Realtime Socket & Remote Agent Task Dispatcher](#module-5-cloud-realtime-socket--remote-agent-task-dispatcher)
   - [Module 6: Multi-Window & Floating Shell System](#module-6-multi-window--floating-shell-system)
   - [Module 7: Standalone Next.js & TCK Dynamic Widget Microfrontend Engine](#module-7-standalone-nextjs--tck-dynamic-widget-microfrontend-engine)
-- [4. Architectural Highlights & Key Takeaways](#4-architectural-highlights--key-takeaways)
+- [4. End-to-End User Request Data Flow](#4-end-to-end-user-request-data-flow)
+- [5. Architectural Highlights & Key Takeaways](#5-architectural-highlights--key-takeaways)
 
 ---
 
@@ -400,7 +401,125 @@ Every widget bundle is packaged as a `.tckb` ZIP archive, identified by a SHA-38
 
 ---
 
-## 4. Architectural Highlights & Key Takeaways
+## 4. End-to-End User Request Data Flow
+
+### 4.1 Scenario 1: Standard Chat & Streaming Inference Flow
+
+When a user submits a prompt in the conversation interface (e.g., *"Summarize my core agenda for today"*):
+
+```
+[React 19 Frontend UI]
+       │
+       │ 1. fetch('/api/cloud/v1/chat/completions', { method: 'POST', body })
+       ▼
+[Windows Named Pipe (\\.\pipe\today-web-runtime-${UUID})]
+       │
+       │ 2. DesktopWebRuntimeCookieBridge intercepts request
+       │    Calls sei.account.getFreshAuthContext() for short-lived JWT
+       │    Injects header Authorization: Bearer <AccessToken>
+       ▼
+[Internal Next.js Standalone Server (server.js)]
+       │
+       │ 3. Reverse-proxies via _originalRewrites rule:
+       │    /api/cloud/:path*  ──►  https://api.todayai.cn/:path*
+       ▼
+[Today AI Cloud Gateway & LLM Cluster (api.todayai.cn)]
+       │
+       │ 4. LLM parses intent and streams generated tokens
+       │    via Server-Sent Events (SSE) back to client
+       ▼
+[Frontend Incremental Rendering] (Driven by Virtual DOM typing effect)
+```
+
+---
+
+### 4.2 Scenario 2: Agentic Local Tool Execution Closed Loop
+
+When a user triggers an action requiring local OS privilege (e.g., *"Find the contracts on my desktop and take a screenshot"*):
+
+```
++----------------------------------------------------------------------------------------------------+
+| Step 1: Cloud Emits Tool Invocation Request                                                        |
+| The Cloud LLM selects fs.list and screen.capture from the registered 53 tools and pushes via WSS:  |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ WebSocket: { "type": "invocation.request", "invocationId": "inv_8f7b...", "capabilityId": "fs.list", "arguments": { "path": "desktop" } }
+       ▼
++----------------------------------------------------------------------------------------------------+
+| Step 2: Client Security Gateway Interception (SocketNativeTools.route)                             |
+| 1. Compute execution deadline: budgetMs = Math.min(300000, request.timeoutMs ?? 30000)            |
+| 2. Scope & Permission assertion: await this.authorization.isInvocationAuthorized(capId, args)      |
+| 3. If unapproved or privileged, opens native tool-permissions dialog for explicit user consent     |
+| 4. Heartbeat: sends sendProgress(invocationId) every 15s to keep LLM connection alive              |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ CPI Serialization: JSON-RPC 2.0 (NDJSON) over Stdin
+       ▼
++----------------------------------------------------------------------------------------------------+
+| Step 3: Cross-Process Execution in C# Host (TodayWindowsPlatformHost.exe)                          |
+| 1. Stdin receives: nei.tools.invocationRequested                                                   |
+| 2. C# host breaks out of Chromium sandbox, executing Win32 file traversal directly                 |
+| 3. For screen.capture, invokes Desktop Duplication API (DXGI) for multi-monitor frame grab         |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ C# host writes response to Stdout in NDJSON:
+       │ { "jsonrpc": "2.0", "method": "nei.tools.completeInvocation", "params": { "invocationId": "inv_8f7b...", "success": true, "data": { ... } } }
+       ▼
++----------------------------------------------------------------------------------------------------+
+| Step 4: Main Process Result Collection & Local Event Dispatch                                      |
+| 1. completeInvocation validates result consistency                                                 |
+| 2. nativeToolCompletions.emit('completed', result) triggers instant local sync without debouncing  |
+| 3. Sends execution result back to cloud via WebSocket: { "type": "invocation.result", ... }       |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ WebSocket transmission to Cloud LLM
+       ▼
++----------------------------------------------------------------------------------------------------+
+| Step 5: Cloud Second-Pass Inference & TCK Dynamic Widget Dispatch                                  |
+| LLM ingests local tool output into context, generates final answer, and outputs a dynamic card ref |
+| { "message": "I found 3 contracts on your desktop...", "widget": { "bundleHash": "contract_v1" } }  |
++----------------------------------------------------------------------------------------------------+
+       │
+       │ Frontend receives widget reference
+       ▼
++----------------------------------------------------------------------------------------------------+
+| Step 6: TCK Dynamic Microfrontend Unpack & Render                                                  |
+| 1. Frontend requests: GET /api/widgets/v1/contract_v1/bundle.tckb                                  |
+| 2. today-widget-runtime unpacks .tckb ZIP archive and verifies cryptographic integrity.json        |
+| 3. Mounts widget.mjs inside Shadow DOM sandbox, presenting an interactive custom UI card           |
++----------------------------------------------------------------------------------------------------+
+```
+
+---
+
+### 4.3 Scenario 3: Real-Time Audio Capture & Meeting Note Generation
+
+When a user initiates a voice query or starts meeting transcription:
+
+```
+[Floating Recording Capsule UI / Main App]
+       │
+       │ 1. Invokes WEI API: window.__DesktopWebExtendedAPI.record.start()
+       ▼
+[Preload (desktop.cjs) ➔ IPC Main]
+       │
+       │ 2. Dispatches CPI: cpi.audio.startCapture({ sampleRate: 16000, channels: 1 })
+       ▼
+[TodayWindowsPlatformHost.exe (.NET Host)]
+       │
+       │ 3. Opens exclusive Windows CoreAudio / WASAPI input stream with acoustic echo cancellation
+       │
+       ├──► 4. Real-time VU Levels (every 50ms):
+       │       Emits cpi.audio.levelChanged({ level: 0.78 }) ➔ Broadcasts to recording-capsule UI
+       │
+       └──► 5. Audio Chunk Stream (every 30s):
+               Emits cpi.audio.segmentCompleted({ segmentId, buffer, durationMs })
+               ➔ Node main process uploads chunks in streams to cloud ASR/Whisper pipeline
+```
+
+---
+
+## 5. Architectural Highlights & Key Takeaways
 
 1. **Security & Process Isolation by Default**:
    Using **Windows Named Pipes** instead of open localhost TCP ports, paired with 256-bit ephemeral tokens and strict origin checks, completely eliminates CSRF and port-scanning vulnerabilities.
