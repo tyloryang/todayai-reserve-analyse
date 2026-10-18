@@ -1,6 +1,6 @@
 # Today AI 桌面客户端架构与源码逐模块逆向分析
 
-本仓库对 **Today AI** 官方 Windows 桌面端安装包（`today-windows-x64.exe`，版本：`1.21.6.0`）进行了深度的逆向工程与代码解构分析。
+**[ 简体中文 ](./README.md)** | [ English Version (README_EN.md) ](./README_EN.md)
 
 ---
 
