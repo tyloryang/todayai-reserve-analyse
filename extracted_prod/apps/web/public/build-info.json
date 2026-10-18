@@ -1,0 +1,11 @@
+{
+  "builtAt": "2026-10-14T13:41:47.428Z",
+  "commit": "3227cea54c3eb772fb7ddbf74cb9370f8e235ef5",
+  "commitShort": "3227cea",
+  "desktopRuntimeBuildEnvironment": "prod",
+  "desktopRuntimeBuildId": "D0l7PkPXl52YZxm-8U5r7LjW8LExV9rj",
+  "desktopRuntimeDeepLinkScheme": "today",
+  "branch": "dev",
+  "dirty": false,
+  "vercelEnv": "production"
+}

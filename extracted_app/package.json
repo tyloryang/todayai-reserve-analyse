@@ -1,0 +1,30 @@
+{
+  "name": "today-desktop-cn",
+  "version": "1.21.6",
+  "private": true,
+  "description": "Today desktop client for Linux, macOS, and Windows.",
+  "homepage": "https://today.ai",
+  "license": "UNLICENSED",
+  "author": {
+    "name": "Today AI",
+    "email": "support@today.ai"
+  },
+  "type": "module",
+  "main": "dist/app/main/index.js",
+  "imports": {
+    "#desktop-platform": "./src/app/platforms/unset/index.ts"
+  },
+  "dependencies": {
+    "@todayai-labs/demo-mode": "workspace:*",
+    "electron-updater": "6.8.9",
+    "eventemitter3": "catalog:",
+    "lodash-es": "catalog:",
+    "set-cookie-parser": "catalog:",
+    "undici": "catalog:",
+    "zod": "catalog:"
+  },
+  "todayDesktopUpdateEnabled": true,
+  "todayDesktopBuild": "2000126",
+  "todayDesktopDefaultEnvironment": "prod",
+  "todayDesktopReleaseRegion": "cn"
+}

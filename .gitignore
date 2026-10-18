@@ -1,0 +1,28 @@
+# Binaries and Installers
+*.exe
+*.dll
+*.node
+*.bin
+*.pak
+*.dat
+*.apk
+*.xapk
+*.7z
+*.asar
+*.msi
+
+# Extracted Heavy Directories & Archives
+extracted_installer/
+extracted_resources/
+
+# Node Modules & Caches
+node_modules/
+extracted_app/node_modules/
+extracted_prod/apps/web/node_modules/
+extracted_prod/apps/web/.next/
+
+# OS and Temp files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
